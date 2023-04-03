@@ -1,0 +1,154 @@
+function _setWinRMLocal
+{
+    param (
+        [Parameter(Mandatory=$true)]
+        [boolean] $State = $false
+    );
+
+    if($State)
+    {
+        $cmd = '@echo off
+winrm set winrm/config/client/auth @{Basic="true"}
+';
+    } else {
+        $cmd = '@echo off
+winrm set winrm/config/client/auth @{Basic="false"}
+';  
+    }
+    $cmd | Out-File -LiteralPath:"$env:TEMP\backup.cmd" -Encoding ascii
+    Invoke-Expression -Command:$env:TEMP\backup.cmd;
+    Remove-Item $env:TEMP\backup.cmd -Force
+}
+
+function _setCimv2TerminalServices
+{
+    param (
+        [Parameter(Mandatory=$true)]
+        [boolean] $State = $false
+    );
+    
+    $_term = Get-WmiObject -ComputerName $env:COMPUTERNAME -Namespace root/cimv2/terminalservices -class Win32_Terminal -Authentication PacketPrivacy;
+    $_term.fEnableTerminal=[int]$State;
+}
+
+function _setTermServSettings
+{
+    param (
+        [Parameter(Mandatory=$true)]
+        [boolean] $State = $false
+    );
+
+    $Enable = [int]$State;
+
+    $_connects = (Get-WmiObject -Class Win32_TerminalServiceSetting -ComputerName $env:COMPUTERNAME `
+        -Namespace root/cimv2/terminalservices -Authentication PacketPrivacy);
+
+    if($_connects.AllowTSConnections -ne [int]$Enable)
+    {    
+        $_connects.AllowTSConnections=[int]$Enable;
+        $_connects.Put();
+    }
+
+    if($_connects.Logons -ne [int]$Enable)
+    {
+        $_connects.Logons=[int]$Enable;
+        $_connects.Put();
+    }
+}
+
+function _getRegKey
+{
+    param (
+        [Parameter(Mandatory=$true)]
+        [string] $Path = $null,
+        [Parameter(Mandatory=$true)]
+        [string] $Key = $null
+    );
+
+    Set-Variable -Name ErrorActionPreference -Value SilentlyContinue;
+    if((Get-PSDrive HKLM).Root -ne "HKEY_LOCAL_MACHINE")
+    {
+        New-PSDrive -Name HKLM -Root HKEY_LOCAL_MACHINE -PSProvider Registry
+    }
+    Set-Variable -Name ErrorActionPreference -Value Continue;
+
+    return (Get-ItemProperty -Name $Key -Path $Path);
+};
+
+function Set-RemoteDesktopWin10
+{
+ 
+    param (
+        [Parameter(Mandatory=$true)]
+        [boolean] $Enable = $false
+    );
+
+    Write-Host "Test: Remotedesktopdienste (TermService)" -ForegroundColor Magenta -NoNewline
+    if((Get-Service -Name TermService | Select-Object -Property Status) -ieq 'Running')
+    {
+        Write-Host " Enabled - disable it" -ForegroundColor Red
+        Stop-Service -Name TermService
+        Set-Service -Name TermService -StartupType Disabled
+    } elseif ($Enable) {
+        Write-Host " Service - enable it" -ForegroundColor Green
+        Set-Service -Name TermService -StartupType Automatic
+        Start-Service -Name TermService
+    } else {
+        Write-Host " Service - disabled" -ForegroundColor Green
+        Stop-Service -Name TermService
+        Set-Service -Name TermService -StartupType Disabled
+    }
+ 
+    Write-Host "Test: Windows-Remoteverwaltung (WS-Verwaltung) (WinRM)" -ForegroundColor Magenta -NoNewline
+    if((Get-Service -Name WinRM | Select-Object -Property Status) -ieq 'Running')
+    {
+        if($Enable -eq $true)
+        {
+            _enableWinRMLocal
+            Set-Service -Name WinRM -StartupType Automatic
+            Start-Service -Name WinRM
+            Write-Host " Service - enabled" -ForegroundColor Yellow
+
+            _setCimv2TerminalServices -State $Enable;
+        } else {
+            Stop-Service -Name WinRM
+            Set-Service -Name WinRM -StartupType Disabled
+            Write-Host " Service - disabled" -ForegroundColor Green
+            _setCimv2TerminalServices -State $Enable;
+        }
+
+        _setTermServSettings -State $Enable;
+    } elseif ($Enable) {
+        Write-Host " Service - enable it" -ForegroundColor Green
+        Set-Service -Name WinRM -StartupType Automatic
+        Start-Service -Name WinRM
+
+        _setTermServSettings -State $Enable;
+    } else {
+        Write-Host " Service - disabled" -ForegroundColor Green
+    }
+
+    Write-Host "Test: Remoteregistrierung (RemoteRegistry)" -ForegroundColor Magenta -NoNewline
+    if((Get-Service -Name RemoteRegistry | Select-Object -Property Status) -ieq 'Running')
+    {
+        Write-Host " Enabled - disable it" -ForegroundColor Red
+        Stop-Service -Name RemoteRegistry
+        Set-Service -Name RemoteRegistry -StartupType Disabled
+    } else {
+        if($Enable -eq $true)
+        {
+            Set-Service -Name RemoteRegistry -StartupType Manual
+            Start-Service -Name RemoteRegistry
+            Write-Host " Service - enabled" -ForegroundColor Yellow
+        } else {
+            Stop-Service -Name RemoteRegistry
+            Set-Service -Name RemoteRegistry -StartupType Disabled
+            Write-Host " Service - disabled" -ForegroundColor Green
+        }
+    }
+
+    Write-Host "Check incoming firewall rules: " -ForegroundColor Magenta -NoNewline
+    Get-NetFirewallRule -DisplayGroup "RemoteDesktop" -Direction Inbound | Select-Object -Property Name,Enabled | Format-Table -AutoSize
+}
+
+Set-RemoteDesktopWin10 -Enable $false
